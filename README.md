@@ -37,9 +37,9 @@ TCLimate is an unofficial, native SwiftUI companion for TCL Home. Check room tem
 
 ## Public beta
 
-**v0.1.3 Public Beta** is available for macOS 14+ on Apple silicon and Intel. The universal app is Developer ID–signed, notarized by Apple, and includes a stapled notarization ticket.
+**v0.1.4 Public Beta** is available for macOS 14+ on Apple silicon and Intel. The universal app is Developer ID–signed, notarized by Apple, and includes a stapled notarization ticket.
 
-[Download TCLimate v0.1.3 DMG](https://github.com/umarz317/TCLimate/releases/download/v0.1.3/TCLimate-v0.1.3-universal.dmg) · [ZIP alternative](https://github.com/umarz317/TCLimate/releases/download/v0.1.3/TCLimate-v0.1.3-universal.zip) · [Release notes and checksums](https://github.com/umarz317/TCLimate/releases/tag/v0.1.3)
+[Download TCLimate v0.1.4 DMG](https://github.com/umarz317/TCLimate/releases/download/v0.1.4/TCLimate-v0.1.4-universal.dmg) · [ZIP alternative](https://github.com/umarz317/TCLimate/releases/download/v0.1.4/TCLimate-v0.1.4-universal.zip) · [Release notes and checksums](https://github.com/umarz317/TCLimate/releases/tag/v0.1.4)
 
 Open the DMG and drag **TCLimate** onto the **Applications** folder shortcut. Eject the disk image, then open TCLimate from Applications. Click the snowflake in the menu bar to sign in. Enable Launch at Login after the app is in its final location. The DMG and app are both notarized and include stapled tickets.
 
