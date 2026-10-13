@@ -1449,9 +1449,9 @@ private struct ACHero: View {
         let tilt = flap.value(at: now, still: reduceMotion)
         let angle = level * (95 + 60 * tilt) * .pi / 180            // 0 = closed (upright), past 90° = tilted down
         let hingeY = outlet.maxY
-        let freeY = hingeY - outlet.height * cos(angle)             // projected free edge
-        let spread = 3 * sin(angle)                                 // nearer the viewer, so it reads slightly wider
-        let bow = 2.5 * sin(angle)
+        let freeY: CGFloat = hingeY - outlet.height * cos(angle)    // projected free edge
+        let spread: CGFloat = 3 * sin(angle)                        // nearer the viewer, so it reads slightly wider
+        let bow: CGFloat = 2.5 * sin(angle)
         let flapBottom = max(freeY, hingeY)
 
         if level > 0.01 {
@@ -1489,7 +1489,7 @@ private struct ACHero: View {
         flap.move(to: CGPoint(x: left, y: hingeY))
         flap.addLine(to: CGPoint(x: right, y: hingeY))
         flap.addLine(to: CGPoint(x: right + spread, y: freeY))
-        flap.addQuadCurve(to: CGPoint(x: left - spread, y: freeY), control: CGPoint(x: (left + right) / 2, y: freeY + bow))
+        flap.addQuadCurve(to: CGPoint(x: left - spread, y: freeY), control: CGPoint(x: outlet.midX, y: freeY + bow))
         flap.closeSubpath()
         if level > 0.01 {
             // The open flap is translucent, so knock out what's behind it first; otherwise the body's bottom outline shows through.
@@ -1504,7 +1504,7 @@ private struct ACHero: View {
                 shade.addFilter(.blur(radius: 2.5))
                 var under = Path()
                 under.move(to: CGPoint(x: right + spread, y: freeY + 1))
-                under.addQuadCurve(to: CGPoint(x: left - spread, y: freeY + 1), control: CGPoint(x: (left + right) / 2, y: freeY + bow + 1))
+                under.addQuadCurve(to: CGPoint(x: left - spread, y: freeY + 1), control: CGPoint(x: outlet.midX, y: freeY + bow + 1))
                 shade.stroke(under, with: .color(.black.opacity(0.35 * open)), lineWidth: 3)
             }
         }
@@ -1520,10 +1520,10 @@ private struct ACHero: View {
             let thickness = 1.8 * open
             var edge = Path()
             edge.move(to: CGPoint(x: right + spread, y: freeY))
-            edge.addQuadCurve(to: CGPoint(x: left - spread, y: freeY), control: CGPoint(x: (left + right) / 2, y: freeY + bow))
+            edge.addQuadCurve(to: CGPoint(x: left - spread, y: freeY), control: CGPoint(x: outlet.midX, y: freeY + bow))
             edge.addLine(to: CGPoint(x: left - spread + 0.5, y: freeY + thickness))
             edge.addQuadCurve(to: CGPoint(x: right + spread - 0.5, y: freeY + thickness),
-                              control: CGPoint(x: (left + right) / 2, y: freeY + bow + thickness))
+                              control: CGPoint(x: outlet.midX, y: freeY + bow + thickness))
             edge.closeSubpath()
             canvas.fill(edge, with: .color(ink.opacity(0.10 * open)))
         }
@@ -1534,7 +1534,7 @@ private struct ACHero: View {
         }
         var lip = Path()
         lip.move(to: CGPoint(x: right + spread, y: freeY))
-        lip.addQuadCurve(to: CGPoint(x: left - spread, y: freeY), control: CGPoint(x: (left + right) / 2, y: freeY + bow))
+        lip.addQuadCurve(to: CGPoint(x: left - spread, y: freeY), control: CGPoint(x: outlet.midX, y: freeY + bow))
         // Front edge catching the light.
         canvas.stroke(lip, with: .color(ink.opacity(0.15 + 0.45 * level)), style: StrokeStyle(lineWidth: 1, lineCap: .round))
 
