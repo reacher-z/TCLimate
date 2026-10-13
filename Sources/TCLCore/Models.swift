@@ -82,6 +82,14 @@ public struct AirConditioner: Identifiable {
     let productKey: String
     public let statusMessage: String?
 
+    /// A made-up unit with every control present, used only to pre-build the UI at launch. Never sent anywhere.
+    public static var warmUpSample: AirConditioner {
+        parse(["deviceId": "warm-up", "deviceName": "Split AC", "nickName": "AC", "isOnline": 1, "productKey": "warm-up"],
+              shadow: ["state": ["reported": ["powerSwitch": 1, "targetTemperature": 24, "currentTemperature": 27, "externalUnitTemperature": 30,
+                                              "workMode": 1, "windSpeed": 0, "sleep": 0, "verticalDirection": 1, "horizontalDirection": 11,
+                                              "healthy": 0, "ECO": 0, "screen": 1, "beepSwitch": 1]]])!
+    }
+
     static func parse(_ thing: [String: Any], shadow: [String: Any]?, failure: String? = nil) -> AirConditioner? {
         guard let id = text(thing, "device_id", "deviceId"), !id.isEmpty else { return nil }
         let model = text(thing, "device_name", "deviceName") ?? "Unknown model"
@@ -99,13 +107,20 @@ public struct AirConditioner: Identifiable {
             targetTemperature: temperature(reported["targetTemperature"]),
             currentTemperature: temperature(reported["currentTemperature"]),
             outdoorTemperature: temperature(reported["externalUnitTemperature"]).flatMap { (-40...80).contains($0) ? $0 : nil },
-            minTemperature: 16, maxTemperature: 30,
+            minTemperature: limit(reported["lowerTemperatureLimit"], fallback: 16, range: 10...30),
+            maxTemperature: limit(reported["upperTemperatureLimit"], fallback: 30, range: 20...35),
             controls: supportedFamily ? reported.reduce(into: [String: Int]()) { values, entry in
                 if let n = number(entry.value), n.isFinite, n >= 0, n <= 100, n.rounded() == n { values[entry.key] = Int(n) }
             } : [:],
             model: model, productKey: text(thing, "productKey", "product_key") ?? "",
             statusMessage: failure ?? (supportedFamily ? (hasPower ? nil : "No supported device state") : "Model support has not been verified"))
     }
+}
+
+/// The unit's own setpoint limit when it reports a sensible one; otherwise the conservative default.
+private func limit(_ value: Any?, fallback: Double, range: ClosedRange<Double>) -> Double {
+    guard let n = number(value), range.contains(n), n.rounded() == n else { return fallback }
+    return n
 }
 
 private func temperature(_ value: Any?) -> Double? {

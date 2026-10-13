@@ -9,6 +9,8 @@ public actor CloudClient {
     private var password = ""
     private var accountRegion: AccountRegion = .singapore
     private var username = ""
+    /// Name and picture from the TCL account, for display only.
+    public private(set) var profile: AccountProfile?
     private var countryCode = ""
     private var ssoToken = ""
     private var saasToken = ""
@@ -40,17 +42,18 @@ public actor CloudClient {
             headers: ["th_platform": "android", "th_version": "4.8.1", "th_appbulid": "830"], operation: "TCL sign-in")
         guard number(auth["status"]) == 1, let token = auth["token"] as? String,
             let user = auth["user"] as? [String: Any], let canonicalUser = user["username"] as? String else {
-            throw CloudError.message("TCL sign-in failed. Use a TCL password associated with your account, rather than your Google password. A CAPTCHA or account verification may require the phone app.")
+            throw CloudError.message(FriendlyError.wrongCredentials)
         }
         ssoToken = token
         username = canonicalUser
         countryCode = text(user, "countryAbbr", "country_abbr") ?? ""
+        profile = AccountProfile(nickname: text(user, "nickname", "nickName"), avatarURL: imageURL(user["headpic"]))
         let urls = try await json(url: URL(string: "https://prod-center.aws.tcljd.com/v3/global/cloud_url_get")!,
             body: ["ssoId": username, "ssoToken": ssoToken], operation: "TCL region discovery")
         guard let data = urls["data"] as? [String: Any], let region = data["cloud_region"] as? String,
             region.range(of: "^[a-z]{2}-[a-z]+-[0-9]+$", options: .regularExpression) != nil,
             let cloud = trustedURL(data["cloud_url"]), let devices = trustedURL(data["device_url"]) else {
-            throw CloudError.message("TCL returned an unsupported cloud region or address.")
+            throw CloudError.message("Your account uses a TCL region this app doesn't support yet. Try a different region.")
         }
         cloudURL = cloud
         deviceURL = devices
@@ -71,7 +74,7 @@ public actor CloudClient {
             body: ["userId": username, "ssoToken": ssoToken, "appId": "wx6e1af3fa84fbe523"], operation: "TCL token renewal")
         guard let data = tokens["data"] as? [String: Any], let saas = text(data, "saas_token", "saasToken"),
             let cognito = text(data, "cognito_token", "cognitoToken"), let identity = jwtSubject(cognito) else {
-            throw CloudError.message("TCL did not provide a cloud session. Sign in again.")
+            throw CloudError.message("TCL couldn't start your session. Try signing in again.")
         }
         saasToken = saas
         let aws = try await json(url: URL(string: "https://cognito-identity.\(awsRegion).amazonaws.com/")!,
@@ -79,13 +82,15 @@ public actor CloudClient {
             headers: ["X-Amz-Target": "AWSCognitoIdentityService.GetCredentialsForIdentity", "Content-Type": "application/x-amz-json-1.1"], operation: "AWS session renewal")
         guard let values = aws["Credentials"] as? [String: Any], let key = values["AccessKeyId"] as? String,
             let secret = values["SecretKey"] as? String, let token = values["SessionToken"] as? String,
-            let expiry = number(values["Expiration"]) else { throw CloudError.message("AWS did not provide device access credentials.") }
+            let expiry = number(values["Expiration"]) else { throw CloudError.message("Couldn't get access to your devices. Try signing in again.") }
         credentials = AWSCredentials(accessKey: key, secretKey: secret, sessionToken: token, expires: Date(timeIntervalSince1970: expiry))
     }
 
     private func ensureSession() async throws {
-        if credentials == nil || credentials!.expires.timeIntervalSinceNow < 120 || Date().timeIntervalSince(loggedInAt) > 45 * 60 {
+        guard let credentials, credentials.expires.timeIntervalSinceNow >= 120,
+              Date().timeIntervalSince(loggedInAt) <= 45 * 60 else {
             try await refresh()
+            return
         }
     }
 
@@ -97,7 +102,7 @@ public actor CloudClient {
         let headers = ["platform": "android", "appversion": "5.4.1", "thomeversion": "4.8.1", "accesstoken": saasToken,
             "accept-language": "en", "timestamp": timestamp, "nonce": String(nonce), "sign": md5(timestamp + nonce + saasToken)]
         let response = try await json(url: deviceURL.appendingPathComponent("v3/user/get_things"), body: [:], headers: headers, operation: "Device discovery")
-        guard let things = response["data"] as? [[String: Any]] else { throw CloudError.message("TCL returned an unexpected device list.") }
+        guard let things = response["data"] as? [[String: Any]] else { throw CloudError.message("TCL sent back a device list this app couldn't read. Try again later.") }
         var result: [AirConditioner] = []
         for thing in things {
             guard let id = text(thing, "device_id", "deviceId") else { continue }
@@ -168,18 +173,17 @@ public actor CloudClient {
         let response: URLResponse
         do { (data, response) = try await session.data(for: request) }
         catch {
-            let code = (error as NSError).code
-            throw CloudError.message("\(operation) could not connect (network \(code)). Check your internet connection.")
+            throw CloudError.message(FriendlyError.network(error))
         }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw CloudError.message("\(operation) failed (HTTP \(code)). Refresh or sign in again.")
+            throw CloudError.message(FriendlyError.http(code))
         }
         if data.isEmpty { return [:] }
-        guard let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CloudError.message("\(operation) returned an unreadable response.") }
+        guard let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CloudError.message("TCL sent a response this app couldn't read. Try again later.") }
         // Never surface server bodies: authentication errors can echo session data.
         if !allowServiceError, let code = number(value["code"]), ![0, 1, 200].contains(code) {
-            throw CloudError.message("\(operation) was rejected by TCL (code \(code.isFinite ? String(format: "%.0f", code) : "unknown")). Sign in again if this continues.")
+            throw CloudError.message("TCL declined the request (code \(code.isFinite ? String(format: "%.0f", code) : "unknown")). Sign in again if this continues.")
         }
         return value
     }
@@ -194,6 +198,19 @@ func jwtSubject(_ token: String) -> String? {
     guard let bytes = Data(base64Encoded: encoded), let object = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return nil }
     return object["sub"] as? String
 }
+public struct AccountProfile: Sendable, Equatable {
+    public let nickname: String?
+    public let avatarURL: URL?
+}
+
+/// A display-only image URL: HTTPS with no embedded credentials. Unlike `trustedURL`, any host is allowed,
+/// because account pictures may live on a third-party CDN; such URLs are never sent TCL credentials.
+func imageURL(_ value: Any?) -> URL? {
+    guard let string = value as? String, let url = URL(string: string), url.scheme == "https", url.host != nil,
+        url.user == nil, url.password == nil else { return nil }
+    return url
+}
+
 func trustedURL(_ value: Any?) -> URL? {
     guard let string = value as? String, let url = URL(string: string), url.scheme == "https", let host = url.host,
         host.hasSuffix(".tcljd.com"), url.user == nil, url.password == nil else { return nil }

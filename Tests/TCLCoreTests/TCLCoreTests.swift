@@ -91,4 +91,17 @@ final class TCLCoreTests: XCTestCase {
         XCTAssertEqual(device.feature(.health), false)
         XCTAssertEqual(try device.desiredState(for: .feature(.health, true)), ["healthy": 1])
     }
+
+    func testSetpointLimitsComeFromTheUnitWithSafeFallbacks() throws {
+        func parse(_ extra: [String: Any]) throws -> AirConditioner {
+            try XCTUnwrap(AirConditioner.parse(["deviceId": "ac-l", "deviceName": "Split AC", "isOnline": 1],
+                shadow: ["state": ["reported": ["powerSwitch": 1, "targetTemperature": 24].merging(extra) { $1 }]]))
+        }
+        let reported = try parse(["lowerTemperatureLimit": 16, "upperTemperatureLimit": 31])
+        XCTAssertEqual(reported.minTemperature, 16)
+        XCTAssertEqual(reported.maxTemperature, 31)
+        XCTAssertEqual(try parse([:]).maxTemperature, 30, "missing limits keep the default")
+        XCTAssertEqual(try parse(["upperTemperatureLimit": 90]).maxTemperature, 30, "implausible limits are ignored")
+        XCTAssertEqual(try parse(["lowerTemperatureLimit": 2]).minTemperature, 16)
+    }
 }

@@ -86,6 +86,19 @@ extension AirConditioner {
         return desired
     }
 
+    /// The state this unit should report once `command` is applied, so the UI can update before the cloud confirms.
+    /// Throws exactly when sending the command would.
+    public func applying(_ command: ACCommand) throws -> AirConditioner {
+        let desired = try desiredState(for: command)
+        return AirConditioner(id: id, name: name, isOnline: isOnline, isSupported: isSupported,
+                              power: desired["powerSwitch"].map { $0 == 1 } ?? power,
+                              targetTemperature: desired["targetTemperature"].map(Double.init) ?? targetTemperature,
+                              currentTemperature: currentTemperature, outdoorTemperature: outdoorTemperature,
+                              minTemperature: minTemperature, maxTemperature: maxTemperature,
+                              controls: controls.merging(desired) { $1 },
+                              model: model, productKey: productKey, statusMessage: statusMessage)
+    }
+
     public func confirms(_ command: ACCommand) -> Bool {
         guard statusMessage == nil else { return false }
         switch command {

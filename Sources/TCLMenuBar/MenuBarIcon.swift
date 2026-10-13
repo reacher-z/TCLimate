@@ -6,6 +6,28 @@ import AppKit
 enum MenuBarIcon {
     static let image = snowflake(size: 18, lineWidth: 1.25, label: "TCLimate")
 
+    /// Split unit, outline body and outlet line only. Marks the Set Temperature reading.
+    static let splitOutlet = template { path in
+        path.appendRoundedRect(NSRect(x: 1.5, y: 5.5, width: 17, height: 7), xRadius: 2.5, yRadius: 2.5)
+        path.move(to: NSPoint(x: 5, y: 8)); path.line(to: NSPoint(x: 15, y: 8))
+    }
+
+    /// Strokes `build`'s path as an 20×18pt template image, so the menu bar tints it.
+    private static func template(_ build: @escaping (NSBezierPath) -> Void) -> NSImage {
+        let image = NSImage(size: NSSize(width: 20, height: 18), flipped: false) { _ in
+            let path = NSBezierPath()
+            build(path)
+            path.lineWidth = 1.25
+            path.lineCapStyle = .round
+            NSColor.black.setStroke()
+            path.stroke()
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = "Air conditioner"
+        return image
+    }
+
     /// Draws the snowflake at its target point size so it stays crisp when used larger in the panel.
     /// Six rays, each with one small branch near its tip (matches the app icon).
     static func snowflake(size: CGFloat, lineWidth: CGFloat, label: String? = nil) -> NSImage {
@@ -51,3 +73,4 @@ struct BrandMark: View {
             .accessibilityHidden(true)
     }
 }
+

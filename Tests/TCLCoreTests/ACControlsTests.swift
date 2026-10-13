@@ -55,4 +55,18 @@ final class ACControlsTests: XCTestCase {
         let offline = try ac([:], online: false)
         XCTAssertThrowsError(try offline.desiredState(for: .power(true)))
     }
+
+    func testApplyingPredictsStateWithoutMutatingTheOriginal() throws {
+        let unit = try XCTUnwrap(AirConditioner.parse(["deviceId": "ac-o", "deviceName": "Split AC", "isOnline": 1],
+            shadow: ["state": ["reported": ["powerSwitch": 0, "targetTemperature": 24, "workMode": 1, "windSpeed": 0, "ECO": 1]]]))
+        XCTAssertThrowsError(try unit.applying(.mode(.heat)), "controls need power on, same as sending")
+        let on = try unit.applying(.power(true))
+        XCTAssertTrue(on.power)
+        XCTAssertFalse(unit.power)
+        XCTAssertEqual(try on.applying(.temperature(21)).targetTemperature, 21)
+        let heating = try on.applying(.mode(.heat))
+        XCTAssertEqual(heating.mode, .heat)
+        XCTAssertEqual(heating.feature(.eco), false, "changing mode clears Eco, as the command does")
+        XCTAssertTrue(try heating.applying(.fan(.high)).confirms(.fan(.high)))
+    }
 }
