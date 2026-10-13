@@ -11,6 +11,9 @@
 ![SwiftUI](https://img.shields.io/badge/UI-SwiftUI-111)
 ![License: MIT](https://img.shields.io/badge/license-MIT-111)
 ![Unofficial](https://img.shields.io/badge/TCL-unofficial-555)
+[![SWH](https://archive.softwareheritage.org/badge/origin/https://github.com/umarz317/TCLimate/)](https://archive.softwareheritage.org/browse/origin/?origin_url=https://github.com/umarz317/TCLimate)
+[![SWH](https://archive.softwareheritage.org/badge/swh:1:dir:3c1c61c9dc22bc070df71dc930e55589a699d48d/)](https://archive.softwareheritage.org/swh:1:dir:3c1c61c9dc22bc070df71dc930e55589a699d48d;origin=https://github.com/umarz317/TCLimate;visit=swh:1:snp:472802268fa02a06e44f29c6953368571347db77;anchor=swh:1:rev:e6027eca51dde174d669c36fa954846414c1db88)
+
 
 </div>
 
