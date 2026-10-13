@@ -35,7 +35,7 @@ final class AppStore: ObservableObject {
     /// Last state each unit actually reported, used to undo predictions that can't be confirmed.
     private var lastReported: [String: AirConditioner] = [:]
     private var sleepTask: Task<Void, Never>?
-    private var watchTask: Task<Void, Never>?
+    private var backgroundRefresh: Task<Void, Never>?
 
     func restore() async {
         guard !attemptedRestore else { await refresh(); return }
@@ -71,7 +71,7 @@ final class AppStore: ObservableObject {
             profile = await candidate.profile
             devices = found
             lastReported = Dictionary(found.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
-            if UserDefaults.standard.bool(forKey: Self.offlineAlertsKey) { startWatching() }
+            startBackgroundRefresh()
             connected = true
             lastUpdated = Date()
             password = ""
@@ -178,8 +178,13 @@ final class AppStore: ObservableObject {
     }
 
     /// Takes the cloud's list, but keeps the predicted state of any other unit with commands still in flight.
+    /// Also where units going offline are noticed, so every fetch (not just one path) can raise the alert.
     private func adopt(_ found: [AirConditioner], for id: String) {
-        for reported in found { lastReported[reported.id] = reported }
+        let alerts = UserDefaults.standard.bool(forKey: Self.offlineAlertsKey)
+        for reported in found {
+            if alerts, !reported.isOnline, lastReported[reported.id]?.isOnline == true { postOfflineAlert(reported.name) }
+            lastReported[reported.id] = reported
+        }
         devices = found.map { reported in
             guard reported.id != id, pendingDevices.contains(reported.id),
                   let local = devices.first(where: { $0.id == reported.id }) else { return reported }
@@ -267,32 +272,32 @@ final class AppStore: ObservableObject {
 
     // MARK: Offline alerts
 
-    /// Posts a notification when a unit goes offline. Off by default; checks every 5 minutes while signed in.
+    /// Posts a notification when a unit goes offline. Off by default; detected by any refresh, including the
+    /// background one.
     func setOfflineAlerts(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: Self.offlineAlertsKey)
-        watchTask?.cancel()
-        watchTask = nil
         guard enabled else { return }
         Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
-        startWatching()
     }
 
     static let offlineAlertsKey = "notifyWhenOffline"
 
-    private func startWatching() {
-        watchTask?.cancel()
-        let current = generation, activeClient = client
-        watchTask = Task { [weak self] in
+    // MARK: Background refresh
+
+    /// How often units refresh while the panel is closed, so the menu bar reading and offline alerts stay current.
+    /// The open panel refreshes faster on its own.
+    static let backgroundRefreshInterval: Duration = .seconds(120)
+
+    private func startBackgroundRefresh() {
+        backgroundRefresh?.cancel()
+        let current = generation
+        backgroundRefresh = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(300))
+                try? await Task.sleep(for: Self.backgroundRefreshInterval)
                 guard !Task.isCancelled, let self, current == self.generation, self.connected else { return }
-                guard let found = try? await activeClient.devices(), current == self.generation else { continue }
-                for unit in found where unit.isOnline == false {
-                    if let before = self.devices.first(where: { $0.id == unit.id }), before.isOnline {
-                        self.postOfflineAlert(unit.name)
-                    }
-                }
-                self.adopt(found, for: "")
+                // Skip when something else (the open panel's poll, a command) fetched recently.
+                if let last = self.lastUpdated, Date().timeIntervalSince(last) < 60 { continue }
+                await self.refresh()
             }
         }
     }
@@ -329,8 +334,8 @@ final class AppStore: ObservableObject {
         commandSerial = [:]
         lastReported = [:]
         cancelSleepTimer()
-        watchTask?.cancel()
-        watchTask = nil
+        backgroundRefresh?.cancel()
+        backgroundRefresh = nil
         notice = nil
         pendingDevices = []
         connected = false
