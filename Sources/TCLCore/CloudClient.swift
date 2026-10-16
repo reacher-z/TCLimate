@@ -1,5 +1,8 @@
 import Foundation
 import CryptoKit
+import os
+
+private let liveLog = Logger(subsystem: "TCLimate", category: "mqtt")
 
 /// Native global TCL Home client. Protocol reference: nemesa/ha-tcl-home-unofficial-integration (MIT).
 /// No account data is persisted or logged by this actor.
@@ -19,6 +22,8 @@ public actor CloudClient {
     private var awsRegion = ""
     private var credentials: AWSCredentials?
     private var loggedInAt = Date.distantPast
+    /// Device records from the last discovery, so a pushed shadow can be turned back into a unit.
+    private var things: [String: [String: Any]] = [:]
 
     public init() {
         let configuration = URLSessionConfiguration.ephemeral
@@ -95,20 +100,16 @@ public actor CloudClient {
     }
 
     public func devices() async throws -> [AirConditioner] {
-        try await ensureSession()
-        guard let deviceURL else { throw CloudError.message("Sign in to TCL first.") }
-        let timestamp = String(Int64(Date().timeIntervalSince1970 * 1000))
-        let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(16)
-        let headers = ["platform": "android", "appversion": "5.4.1", "thomeversion": "4.8.1", "accesstoken": saasToken,
-            "accept-language": "en", "timestamp": timestamp, "nonce": String(nonce), "sign": md5(timestamp + nonce + saasToken)]
-        let response = try await json(url: deviceURL.appendingPathComponent("v3/user/get_things"), body: [:], headers: headers, operation: "Device discovery")
-        guard let things = response["data"] as? [[String: Any]] else { throw CloudError.message("TCL sent back a device list this app couldn't read. Try again later.") }
+        let things = try await fetchThings()
         var result: [AirConditioner] = []
+        var known: [String: [String: Any]] = [:]
+        defer { self.things = known }
         for thing in things {
             guard let id = text(thing, "device_id", "deviceId") else { continue }
             let model = text(thing, "device_name", "deviceName") ?? ""
             let category = text(thing, "category") ?? ""
             guard model.localizedCaseInsensitiveContains("AC") || category.localizedCaseInsensitiveContains("air") else { continue }
+            known[id] = thing
             do {
                 let state = try await awsRequest(path: "things/\(SigV4.encode(id))/shadow", method: "GET", body: nil)
                 if let device = AirConditioner.parse(thing, shadow: state) { result.append(device) }
@@ -117,6 +118,25 @@ public actor CloudClient {
             }
         }
         return result
+    }
+
+    /// TCL's online flag for every unit, from one device-list request without reading any shadows.
+    public func onlineStatus() async throws -> [String: Bool] {
+        try await fetchThings().reduce(into: [:]) { result, thing in
+            if let id = text(thing, "device_id", "deviceId") { result[id] = number(thing["is_online"] ?? thing["isOnline"]) == 1 }
+        }
+    }
+
+    private func fetchThings() async throws -> [[String: Any]] {
+        try await ensureSession()
+        guard let deviceURL else { throw CloudError.message("Sign in to TCL first.") }
+        let timestamp = String(Int64(Date().timeIntervalSince1970 * 1000))
+        let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(16)
+        let headers = ["platform": "android", "appversion": "5.4.1", "thomeversion": "4.8.1", "accesstoken": saasToken,
+            "accept-language": "en", "timestamp": timestamp, "nonce": String(nonce), "sign": md5(timestamp + nonce + saasToken)]
+        let response = try await json(url: deviceURL.appendingPathComponent("v3/user/get_things"), body: [:], headers: headers, operation: "Device discovery")
+        guard let things = response["data"] as? [[String: Any]] else { throw CloudError.message("TCL sent back a device list this app couldn't read. Try again later.") }
+        return things
     }
 
     public func control(device: AirConditioner, command: ACCommand) async throws {
@@ -147,6 +167,88 @@ public actor CloudClient {
             request.setValue(value, forHTTPHeaderField: key)
         }
         return EnergyReport.parse(try await send(request, operation: "Electricity statistics", allowServiceError: true), now: now)
+    }
+
+    /// Live shadow updates over MQTT. Reconnects on its own, slowing down if the broker refuses this account;
+    /// callers keep polling either way. Read-only: it never publishes.
+    public func liveUpdates() -> AsyncStream<LiveEvent> {
+        AsyncStream { continuation in
+            let task = Task { await self.runLive(continuation) }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func runLive(_ continuation: AsyncStream<LiveEvent>.Continuation) async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 25
+        configuration.urlCache = nil
+        let live = URLSession(configuration: configuration, delegate: CloudSessionDelegate(), delegateQueue: nil)
+        defer { live.invalidateAndCancel(); continuation.finish() }
+        var delay = 2.0, refusals = 0
+        while !Task.isCancelled {
+            var subscribed = false
+            do {
+                try await ensureSession()
+                guard let credentials else { return }
+                // No units yet: wait for a discovery fetch to find one.
+                if things.isEmpty { try? await Task.sleep(for: .seconds(60)); continue }
+                let unitIDs = Set(things.keys)
+                let topics = unitIDs.map { "$aws/things/\($0)/shadow/update/documents" }
+                let url = SigV4.presignedMQTTURL(host: "data-ats.iot.\(awsRegion).amazonaws.com", credentials: credentials, region: awsRegion)
+                let connection = MQTTConnection(url: url, session: live)
+                let started = Date()
+                // A network drop (Wi-Fi handoff, router restart) can leave the socket open but dead. The broker answers
+                // every ping, so 90 seconds of silence means the connection is gone: close it and let the loop reconnect.
+                let pinger = Task {
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: .seconds(30))
+                        if Date().timeIntervalSince(connection.lastReceived) > 90 {
+                            liveLog.notice("MQTT silent for 90s, reconnecting")
+                            connection.close()
+                            return
+                        }
+                        // A discovery fetch found a unit added since connecting: reconnect to subscribe to it too.
+                        if !Set(self.things.keys).isSubset(of: unitIDs) {
+                            liveLog.notice("MQTT new unit found, resubscribing")
+                            connection.close()
+                            return
+                        }
+                        try? await connection.ping()
+                    }
+                }
+                defer { pinger.cancel(); connection.close() }
+                subscribed = try await connection.open(clientID: "tclimate-\(UUID().uuidString.prefix(8).lowercased())", topics: topics) > 0
+                guard subscribed else { throw MQTTError.refused }
+                refusals = 0
+                delay = 2
+                liveLog.notice("MQTT connected, \(topics.count, privacy: .public) topics")
+                continuation.yield(.connected)
+                // Reconnect before the 45-minute session ends so the next URL is signed with fresh credentials.
+                while !Task.isCancelled, Date().timeIntervalSince(started) < 40 * 60 {
+                    guard case .publish(let topic, let payload) = try await connection.next(),
+                          let update = liveDevice(topic: topic, payload: payload) else { continue }
+                    continuation.yield(.update(update))
+                }
+            } catch {
+                if Task.isCancelled { return }
+                let ns = error as NSError
+                liveLog.notice("MQTT failed: \(ns.domain, privacy: .public) \(ns.code, privacy: .public) subscribed=\(subscribed, privacy: .public)")
+                if !subscribed { refusals += 1 }
+            }
+            continuation.yield(.disconnected)
+            // Never subscribed (offline, or the broker refuses this account): back off to every 5 minutes.
+            try? await Task.sleep(for: .seconds(refusals >= 3 ? 300 : delay))
+            delay = min(delay * 2, 60)
+        }
+    }
+
+    private func liveDevice(topic: String, payload: Data) -> AirConditioner? {
+        let parts = topic.split(separator: "/").map(String.init)
+        guard parts.count == 6, parts[0] == "$aws", parts[2] != "", let thing = things[parts[2]],
+              let document = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              let current = document["current"] as? [String: Any],
+              let device = AirConditioner.parse(thing, shadow: current), device.isSupported else { return nil }
+        return device
     }
 
     private func awsRequest(path: String, method: String, body: [String: Any]?) async throws -> [String: Any] {
@@ -198,6 +300,12 @@ func jwtSubject(_ token: String) -> String? {
     guard let bytes = Data(base64Encoded: encoded), let object = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return nil }
     return object["sub"] as? String
 }
+
+public enum LiveEvent {
+    case connected, disconnected
+    case update(AirConditioner)
+}
+
 public struct AccountProfile: Sendable, Equatable {
     public let nickname: String?
     public let avatarURL: URL?

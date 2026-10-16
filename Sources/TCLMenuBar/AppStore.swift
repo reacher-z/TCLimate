@@ -36,6 +36,14 @@ final class AppStore: ObservableObject {
     private var lastReported: [String: AirConditioner] = [:]
     private var sleepTask: Task<Void, Never>?
     private var backgroundRefresh: Task<Void, Never>?
+    private var liveTask: Task<Void, Never>?
+    /// True while MQTT is delivering updates, so polling can relax.
+    private var liveConnected = false
+    /// Latest state pushed for each unit since its last command.
+    private var pushed: [String: AirConditioner] = [:]
+    private var lastPolled: Date?
+    private var onlineCheck: Task<Void, Never>?
+    private var energyRefresh: Task<Void, Never>?
 
     func restore() async {
         guard !attemptedRestore else { await refresh(); return }
@@ -72,6 +80,9 @@ final class AppStore: ObservableObject {
             devices = found
             lastReported = Dictionary(found.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
             startBackgroundRefresh()
+            startLive(candidate, generation: current)
+            startOnlineCheck(candidate, generation: current)
+            startEnergyRefresh(generation: current)
             connected = true
             lastUpdated = Date()
             password = ""
@@ -119,6 +130,7 @@ final class AppStore: ObservableObject {
         replace(predicted)
         error = nil
         unconfirmedDevices.remove(id)
+        pushed[id] = nil
         pendingDevices.insert(id)
         let serial = (commandSerial[id] ?? 0) + 1
         commandSerial[id] = serial
@@ -150,7 +162,21 @@ final class AppStore: ObservableObject {
         // A newer command for this unit will do the verifying.
         guard commandSerial[id] == serial else { return }
         for delay in [2.0, 2.0, 3.0] {
-            try? await Task.sleep(for: .seconds(delay))
+            // With a live connection the unit's own report usually arrives first; check for it before polling.
+            var waited = 0.0
+            while liveConnected, waited < delay {
+                try? await Task.sleep(for: .milliseconds(200))
+                waited += 0.2
+                guard current == generation, commandSerial[id] == serial else { return }
+                if let live = pushed[id], live.confirms(command) {
+                    replace(live)
+                    lastReported[id] = live
+                    lastUpdated = Date()
+                    finishPending(id)
+                    return
+                }
+            }
+            if !liveConnected { try? await Task.sleep(for: .seconds(delay)) }
             guard current == generation, commandSerial[id] == serial else { return }
             guard let found = try? await client.devices() else { continue }
             guard current == generation, commandSerial[id] == serial else { return }
@@ -180,6 +206,7 @@ final class AppStore: ObservableObject {
     /// Takes the cloud's list, but keeps the predicted state of any other unit with commands still in flight.
     /// Also where units going offline are noticed, so every fetch (not just one path) can raise the alert.
     private func adopt(_ found: [AirConditioner], for id: String) {
+        lastPolled = Date()
         let alerts = UserDefaults.standard.bool(forKey: Self.offlineAlertsKey)
         for reported in found {
             if alerts, !reported.isOnline, lastReported[reported.id]?.isOnline == true { postOfflineAlert(reported.name) }
@@ -282,11 +309,83 @@ final class AppStore: ObservableObject {
 
     static let offlineAlertsKey = "notifyWhenOffline"
 
+    // MARK: Live updates (MQTT)
+
+    private func startLive(_ client: CloudClient, generation current: Int) {
+        liveTask?.cancel()
+        liveTask = Task { [weak self] in
+            for await event in await client.liveUpdates() {
+                guard let self, current == self.generation else { return }
+                switch event {
+                case .connected:
+                    self.liveConnected = true
+                    // Catch up on anything that changed while disconnected (skipped right after sign-in's own fetch).
+                    if let last = self.lastPolled, Date().timeIntervalSince(last) > 30 { await self.refresh() }
+                case .disconnected: self.liveConnected = false
+                case .update(let device): self.applyLive(device)
+                }
+            }
+            if let self, current == self.generation { self.liveConnected = false }
+        }
+    }
+
+    /// A pushed report replaces the unit's state, unless a command is still in flight (the prediction stays until it confirms).
+    private func applyLive(_ device: AirConditioner) {
+        guard let known = devices.first(where: { $0.id == device.id }), known.isOnline else { return }
+        pushed[device.id] = device
+        lastReported[device.id] = device
+        guard !pendingDevices.contains(device.id) else { return }
+        replace(device)
+        unconfirmedDevices.remove(device.id)
+        lastUpdated = Date()
+    }
+
+    // MARK: Online check
+
+    /// How often TCL's online flag is checked. MQTT doesn't report units dropping off (they connect through
+    /// TCL's own broker, so AWS presence events never fire); this is one light request for all units.
+    static let onlineCheckInterval: Duration = .seconds(60)
+
+    private func startOnlineCheck(_ client: CloudClient, generation current: Int) {
+        onlineCheck?.cancel()
+        onlineCheck = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.onlineCheckInterval)
+                guard !Task.isCancelled, let self, current == self.generation, self.connected else { return }
+                // A full fetch in the last minute already carried the flag.
+                if let last = self.lastPolled, Date().timeIntervalSince(last) < 60 { continue }
+                guard let status = try? await client.onlineStatus(), current == self.generation else { continue }
+                self.applyOnline(status)
+            }
+        }
+    }
+
+    private func applyOnline(_ status: [String: Bool]) {
+        var cameBack = false
+        for unit in devices {
+            guard let online = status[unit.id], online != unit.isOnline else { continue }
+            if online { cameBack = true } else { markOffline(unit) }
+        }
+        // A unit back online may have changed while away: fetch its full state.
+        if cameBack { Task { await refresh() } }
+    }
+
+    private func markOffline(_ unit: AirConditioner) {
+        if UserDefaults.standard.bool(forKey: Self.offlineAlertsKey), lastReported[unit.id]?.isOnline == true {
+            postOfflineAlert(unit.name)
+        }
+        let offline = unit.with(online: false)
+        lastReported[unit.id] = offline
+        replace(offline)
+        lastUpdated = Date()
+    }
+
     // MARK: Background refresh
 
-    /// How often units refresh while the panel is closed, so the menu bar reading and offline alerts stay current.
-    /// The open panel refreshes faster on its own.
+    /// How often units refresh while MQTT is down, so the menu bar reading and offline alerts stay current.
     static let backgroundRefreshInterval: Duration = .seconds(120)
+    /// Safety poll while MQTT looks connected: catches a silently dead connection.
+    static let liveSafetyInterval: TimeInterval = 10 * 60
 
     private func startBackgroundRefresh() {
         backgroundRefresh?.cancel()
@@ -295,8 +394,9 @@ final class AppStore: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: Self.backgroundRefreshInterval)
                 guard !Task.isCancelled, let self, current == self.generation, self.connected else { return }
-                // Skip when something else (the open panel's poll, a command) fetched recently.
-                if let last = self.lastUpdated, Date().timeIntervalSince(last) < 60 { continue }
+                // Skip when something else (the open panel, a command, a reconnect) fetched recently.
+                let quiet = self.liveConnected ? Self.liveSafetyInterval : 60
+                if let last = self.lastPolled, Date().timeIntervalSince(last) < quiet { continue }
                 await self.refresh()
             }
         }
@@ -307,6 +407,25 @@ final class AppStore: ObservableObject {
         content.title = "\(name) is offline"
         content.body = "TCLimate can't reach this AC. Check its power and Wi-Fi."
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "offline-\(name)-\(Date().timeIntervalSince1970)", content: content, trigger: nil))
+    }
+
+    // MARK: Electricity
+
+    /// TCL updates daily kWh slowly, so a quarter-hour keeps the panel's figures current without extra load.
+    static let energyRefreshInterval: Duration = .seconds(15 * 60)
+
+    /// Loads every unit's electricity figures at sign-in, then refreshes them on an interval.
+    private func startEnergyRefresh(generation current: Int) {
+        energyRefresh?.cancel()
+        energyRefresh = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, current == self.generation, self.connected else { return }
+                for device in self.devices where device.isOnline && device.isSupported {
+                    await self.loadEnergy(for: device)
+                }
+                try? await Task.sleep(for: Self.energyRefreshInterval)
+            }
+        }
     }
 
     func loadEnergy(for device: AirConditioner) async {
@@ -336,6 +455,14 @@ final class AppStore: ObservableObject {
         cancelSleepTimer()
         backgroundRefresh?.cancel()
         backgroundRefresh = nil
+        liveTask?.cancel()
+        liveTask = nil
+        liveConnected = false
+        onlineCheck?.cancel()
+        onlineCheck = nil
+        energyRefresh?.cancel()
+        energyRefresh = nil
+        pushed = [:]
         notice = nil
         pendingDevices = []
         connected = false

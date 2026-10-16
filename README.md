@@ -106,9 +106,11 @@ TCLimate relies on unofficial cloud APIs that TCL may change at any time.
 | Sign-in, device discovery, state reads | ✅ Verified (Pakistan account, Split AC units) |
 | Power and temperature | ✅ Verified through cloud-reported state |
 | Electricity statistics | ✅ Daily kWh verified on two units via TCL Home 7's statistics API |
-| Modes, fan, airflow, Eco, sleep, display, beep | 🧪 Implemented and unit-tested; not yet verified on hardware |
+| Modes, fan, airflow, Eco, sleep, display, beep | 🧪 Implemented; not yet verified on hardware |
 | Other AC models and regions | ❔ Not yet verified |
-| LAN control, Google sign-in, live MQTT updates | — Not implemented |
+| Live updates over MQTT | ✅ Verified (Pakistan account); falls back to polling when the connection is down |
+| Offline alerts | ✅ Verified; TCL's online flag is checked every 60 seconds |
+| LAN control, Google sign-in | — Not implemented |
 
 A confirmed command means TCL's cloud reports the requested state. That is not independent proof of what the physical unit did.
 

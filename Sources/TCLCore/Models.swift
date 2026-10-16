@@ -90,6 +90,14 @@ public struct AirConditioner: Identifiable {
                                               "healthy": 0, "ECO": 0, "screen": 1, "beepSwitch": 1]]])!
     }
 
+    /// The same unit with a different online status, from TCL's online flag.
+    public func with(online: Bool) -> AirConditioner {
+        AirConditioner(id: id, name: name, isOnline: online, isSupported: isSupported, power: power,
+                       targetTemperature: targetTemperature, currentTemperature: currentTemperature,
+                       outdoorTemperature: outdoorTemperature, minTemperature: minTemperature, maxTemperature: maxTemperature,
+                       controls: controls, model: model, productKey: productKey, statusMessage: statusMessage)
+    }
+
     static func parse(_ thing: [String: Any], shadow: [String: Any]?, failure: String? = nil) -> AirConditioner? {
         guard let id = text(thing, "device_id", "deviceId"), !id.isEmpty else { return nil }
         let model = text(thing, "device_name", "deviceName") ?? "Unknown model"
