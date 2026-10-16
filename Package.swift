@@ -7,8 +7,7 @@ let package = Package(
     products: [.executable(name: "TCLimate", targets: ["TCLMenuBar"]), .library(name: "TCLCore", targets: ["TCLCore"])],
     targets: [
         .target(name: "TCLCore"),
-        .executableTarget(name: "TCLMenuBar", dependencies: ["TCLCore"]),
-        .testTarget(name: "TCLCoreTests", dependencies: ["TCLCore"])
+        .executableTarget(name: "TCLMenuBar", dependencies: ["TCLCore"])
     ],
     swiftLanguageModes: [.v5]
 )

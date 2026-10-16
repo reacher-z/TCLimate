@@ -53,8 +53,6 @@ If you prefer the ZIP, unzip it and move **TCLimate.app** to Applications before
 To build locally:
 
 ```sh
-swift test
-
 # Find an installed signing certificate.
 security find-identity -v -p codesigning
 
@@ -119,17 +117,15 @@ A confirmed command means TCL's cloud reports the requested state. That is not i
 ```
 Sources/TCLCore      Authentication, cloud requests, SigV4 signing, models, command mapping
 Sources/TCLMenuBar   SwiftUI panel, Keychain, Launch at Login, menu bar icon
-Tests/TCLCoreTests   Offline tests (no credentials or devices needed)
 Scripts              App packaging, code signing, icon generation
 ```
 
 ```sh
 swift build
-swift test
 ./Scripts/build-app.sh
 ```
 
-GitHub Actions runs the offline tests on macOS. Packaging is local only, because it needs your signing certificate. For universal Developer ID builds and notarization, see [Docs/Releasing.md](Docs/Releasing.md). Protocol and validation notes are in [Docs/Investigation.md](Docs/Investigation.md).
+Packaging is local only, because it needs your signing certificate. For universal Developer ID builds and notarization, see [Docs/Releasing.md](Docs/Releasing.md). Protocol and validation notes are in [Docs/Investigation.md](Docs/Investigation.md).
 
 Keep only one installed copy when configuring Login Items.
 

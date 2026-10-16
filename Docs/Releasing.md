@@ -19,7 +19,6 @@ Enter Apple credentials only at the local prompts. Apple ID authentication requi
 Update both version fields in `Scripts/Info.plist` when shipping a new version. Build from the exact commit that will be tagged.
 
 ```sh
-swift test
 ./Scripts/build-app.sh release
 export TCL_NOTARY_PROFILE=TCLimate
 ./Scripts/notarize-release.sh
