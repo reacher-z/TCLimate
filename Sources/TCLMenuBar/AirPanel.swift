@@ -1113,9 +1113,12 @@ private extension ACFeature {
 
 private struct EnergyChart: View {
     let report: EnergyReport
+    /// The day whose details show under the chart; tap a bar to pick it, tap again to clear.
+    @State private var selected: String?
 
     private struct Bar: Identifiable {
         let id: String
+        let date: Date
         let label: String
         let kWh: Double?
         let isToday: Bool
@@ -1132,37 +1135,74 @@ private struct EnergyChart: View {
         return (0..<7).compactMap { offset in
             guard let date = calendar.date(byAdding: .day, value: offset, to: start) else { return nil }
             let key = parser.string(from: date)
-            return Bar(id: key, label: date.formatted(.dateTime.weekday(.narrow)), kWh: values[key], isToday: key == report.today)
+            return Bar(id: key, date: date, label: date.formatted(.dateTime.weekday(.narrow)), kWh: values[key], isToday: key == report.today)
         }
     }
 
     var body: some View {
         let bars = bars
         let peak = max(bars.compactMap(\.kWh).max() ?? 0, 0.01)
-        HStack(alignment: .bottom, spacing: 6) {
-            ForEach(bars) { bar in
-                VStack(spacing: 4) {
-                    GeometryReader { proxy in
-                        VStack {
-                            Spacer(minLength: 0)
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(bar.isToday ? Color.primary : Color.primary.opacity(0.25))
-                                .frame(height: bar.kWh.map { max(2, proxy.size.height * $0 / peak) } ?? 0)
+        // Today is partial, so it would drag the average down.
+        let readings = bars.filter { !$0.isToday }.compactMap(\.kWh)
+        let average = readings.isEmpty ? nil : readings.reduce(0, +) / Double(readings.count)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .bottom, spacing: 6) {
+                ForEach(bars) { bar in
+                    let isSelected = selected == bar.id
+                    VStack(spacing: 4) {
+                        GeometryReader { proxy in
+                            VStack {
+                                Spacer(minLength: 0)
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(isSelected || (selected == nil && bar.isToday) ? Color.primary : Color.primary.opacity(0.25))
+                                    .frame(height: bar.kWh.map { max(2, proxy.size.height * $0 / peak) } ?? 0)
+                            }
                         }
+                        Text(bar.label)
+                            .foregroundStyle(isSelected || bar.isToday ? .primary : .secondary)
+                            .fontWeight(isSelected || bar.isToday ? .semibold : .regular)
                     }
-                    Text(bar.label)
-                        .foregroundStyle(bar.isToday ? .primary : .secondary)
-                        .fontWeight(bar.isToday ? .semibold : .regular)
+                    .frame(maxWidth: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture { selected = isSelected ? nil : bar.id }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(bar.date.formatted(date: .complete, time: .omitted))
+                    .accessibilityValue(bar.kWh.map { "\($0.formatted(.number.precision(.fractionLength(2)))) kilowatt hours" } ?? "No reading")
+                    .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+                    .accessibilityAction { selected = isSelected ? nil : bar.id }
                 }
-                .frame(maxWidth: .infinity)
-                .help(bar.kWh.map { "\(bar.id): \($0.formatted(.number.precision(.fractionLength(2)))) kWh" } ?? "\(bar.id): no reading")
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(bar.id)
-                .accessibilityValue(bar.kWh.map { "\($0.formatted(.number.precision(.fractionLength(2)))) kilowatt hours" } ?? "No reading")
+            }
+            .frame(height: 64)
+            if let bar = bars.first(where: { $0.id == selected }) {
+                detail(bar, average: average).transition(.opacity)
             }
         }
-        .frame(height: 64)
         .animation(.snappy, value: report.fetchedAt)
+        .animation(.snappy, value: selected)
+    }
+
+    /// Date, reading, and how a full day compares with the other days' average.
+    private func detail(_ bar: Bar, average: Double?) -> some View {
+        HStack(spacing: 6) {
+            Text(bar.date.formatted(.dateTime.weekday(.wide).day().month(.abbreviated)))
+                .fontWeight(.semibold)
+            Text("·").foregroundStyle(.tertiary)
+            if let kWh = bar.kWh {
+                Text("\(kWh.formatted(.number.precision(.fractionLength(2)))) kWh").monospacedDigit()
+                if let average, average > 0, !bar.isToday {
+                    let change = (kWh - average) / average
+                    Text("·").foregroundStyle(.tertiary)
+                    Text(abs(change) < 0.05 ? "about average"
+                         : "\(abs(change).formatted(.percent.precision(.fractionLength(0)))) \(change > 0 ? "above" : "below") average")
+                        .foregroundStyle(.secondary)
+                }
+                if bar.isToday { Text("· so far").foregroundStyle(.secondary) }
+            } else {
+                Text("No reading").foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
