@@ -5,54 +5,52 @@ import TCLCore
 
 struct AirPanel: View {
     @ObservedObject var store: AppStore
+    @ObservedObject var panel: PanelState
     @StateObject private var launchAtLogin = LaunchAtLogin()
     @State private var contentHeight: CGFloat?
-    /// The panel's rendered height, including mid-animation values, so the window resizes in step with the content.
-    @State private var panelHeight: CGFloat?
     @AppStorage("selectedDeviceID") private var selectedDeviceID = ""
-    @State private var showSettings = false
-    @State private var screenHeight: CGFloat?
     private let poll = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            // An explicit height lets MenuBarExtra size its window; scrolls past the cap.
+            // An explicit height sizes the window; scrolls past the cap.
             ScrollViewReader { proxy in
                 ScrollView {
                     content
                         .environment(\.scrollToSection) { id in
+                            // Only when the content outgrows the cap; otherwise the panel is still growing to fit it,
+                            // and scrolling mid-growth would bounce the content up and back down.
+                            guard (contentHeight ?? 0) > heightCap else { return }
                             withAnimation(.snappy) { proxy.scrollTo(id, anchor: .top) }
                         }
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                            // While shown, changes animate with the content's own spring and the window follows every
+                            // frame, so nothing is clipped or left empty. While hidden they apply at once.
+                            let animate = contentHeight != nil && panel.isShown
+                            withTransaction(Transaction(animation: animate ? .snappy : nil)) { contentHeight = height }
+                        }
                 }
                 .scrollBounceBehavior(.basedOnSize)
                 .scrollIndicators(.hidden)
-                .frame(height: contentHeight.map { min($0, heightCap) })
-                // Height changes apply at once (the window follows with its top pinned); only content fades, never slides.
-                .animation(nil, value: contentHeight)
+                .modifier(AnimatedHeight(height: contentHeight.map { min($0, heightCap) }))
             }
         }
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { panelHeight = (contentHeight ?? 0) > 0 ? $0 : nil }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { if (contentHeight ?? 0) > 0 { panel.onHeightChange($0) } }
         .frame(width: 380)
         .frame(maxHeight: .infinity, alignment: .top)
         .tint(.gray)
-        .background(WindowTopAnchor(height: panelHeight, keepOpenForAutoFill: !store.connected))
-        .onAppear { launchAtLogin.refresh(); updateScreenHeight() }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            launchAtLogin.refresh()
-            updateScreenHeight()
-        }
+        .onChange(of: panel.isShown, initial: true) { _, shown in if shown { launchAtLogin.refresh() } }
         .onReceive(poll) { _ in
-            if NSApplication.shared.keyWindow?.isVisible == true { Task { await store.refresh() } }
+            if panel.isShown { Task { await store.refresh() } }
         }
         .background(shortcuts)
-        .onChange(of: store.connected) { _, connected in if !connected { showSettings = false } }
+        .onChange(of: store.connected) { _, connected in if !connected { panel.showSettings = false } }
     }
 
     private var selectedDevice: AirConditioner? { store.devices.first { $0.id == selectedDeviceID } ?? store.devices.first }
 
-    /// Keyboard control: ⌘↑/⌘↓ change the selected unit's target, ⌘1–⌘3 switch units.
+    /// Keyboard control: ⌘↑/⌘↓ change the selected unit's target, ⌘1–⌘3 switch units. ⌘Q is in the main menu.
     /// The buttons are invisible and take no layout space.
     private var shortcuts: some View {
         ZStack {
@@ -61,7 +59,6 @@ struct AirPanel: View {
             Button("Unit 1") { select(0) }.keyboardShortcut("1", modifiers: .command)
             Button("Unit 2") { select(1) }.keyboardShortcut("2", modifiers: .command)
             Button("Unit 3") { select(2) }.keyboardShortcut("3", modifiers: .command)
-            Button("Quit") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")
         }
         .buttonStyle(.plain).frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
     }
@@ -82,15 +79,8 @@ struct AirPanel: View {
     /// How tall the scrolling area may get: most of the screen the panel opened on, so a full device card fits
     /// without scrolling where there is room. It never exceeds that screen; shorter screens scroll instead.
     private var heightCap: CGFloat {
-        let available = (screenHeight ?? NSScreen.main?.visibleFrame.height ?? 800) - 90
+        let available = (panel.screenHeight ?? NSScreen.main?.visibleFrame.height ?? 800) - 90
         return max(min(available, 760), 200)
-    }
-
-    /// The screen whose menu bar was clicked (the pointer is on it when the panel opens), not `NSScreen.main`,
-    /// which can be another display before the panel becomes key.
-    private func updateScreenHeight() {
-        let mouse = NSEvent.mouseLocation
-        screenHeight = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame.height
     }
 
     private var content: some View {
@@ -99,7 +89,7 @@ struct AirPanel: View {
             // Overlaid rather than stacked, so the outgoing and incoming pages cross-fade in place instead of
             // the new page sliding up as the old one leaves.
             ZStack(alignment: .top) {
-                if showSettings {
+                if panel.showSettings {
                     SettingsPage(store: store, launchAtLogin: launchAtLogin, selectedDevice: selectedDevice)
                         .transition(.opacity)
                 } else if store.connected {
@@ -117,8 +107,8 @@ struct AirPanel: View {
 
     private var header: some View {
         HStack(spacing: 4) {
-            if showSettings {
-                Button { withAnimation(.easeInOut(duration: 0.2)) { showSettings = false } } label: {
+            if panel.showSettings {
+                Button { withAnimation(.easeInOut(duration: 0.2)) { panel.showSettings = false } } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "chevron.left").font(.system(size: 11, weight: .semibold))
                         Text("Settings").font(.system(size: 13, weight: .semibold))
@@ -132,7 +122,7 @@ struct AirPanel: View {
                 Text("TCLimate").font(.system(size: 13, weight: .semibold))
             }
             Spacer()
-            if store.connected && !showSettings {
+            if store.connected && !panel.showSettings {
                 Button { Task { await store.refresh() } } label: {
                     if store.busy { ProgressView().controlSize(.small).frame(width: 16, height: 16) }
                     else { Image(systemName: "arrow.clockwise") }
@@ -143,8 +133,8 @@ struct AirPanel: View {
                 .keyboardShortcut("r")
             }
             // In Settings the back button closes it, so the gear is only shown outside it.
-            if !showSettings {
-                Button { withAnimation(.easeInOut(duration: 0.2)) { showSettings = true } } label: {
+            if !panel.showSettings {
+                Button { withAnimation(.easeInOut(duration: 0.2)) { panel.showSettings = true } } label: {
                     Image(systemName: "gearshape")
                 }
                 .buttonStyle(HeaderButtonStyle())
@@ -221,6 +211,36 @@ private struct HeaderButtonStyle: ButtonStyle {
     }
 }
 
+/// A full-width row that answers the pointer: a soft highlight on hover, a firmer one and a slight press-in on click.
+/// The highlight bleeds past the row's edges so the text keeps its alignment with the card.
+private struct SectionRowStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Row(label: configuration.label, pressed: configuration.isPressed)
+    }
+
+    private struct Row<Label: View>: View {
+        let label: Label
+        let pressed: Bool
+        @State private var hovering = false
+
+        var body: some View {
+            label
+                .padding(.horizontal, 8)
+                .background(.primary.opacity(pressed ? 0.1 : hovering ? 0.05 : 0), in: RoundedRectangle(cornerRadius: 7))
+                .scaleEffect(pressed ? 0.985 : 1)
+                .padding(.horizontal, -8)
+                .onHover { hovering = $0 }
+                .animation(.snappy(duration: 0.18), value: pressed)
+                .animation(.easeOut(duration: 0.15), value: hovering)
+        }
+    }
+}
+
+private extension AnyTransition {
+    /// A section's content settles in from just above as it fades, and lifts away as it leaves.
+    static var sectionReveal: AnyTransition { .opacity.combined(with: .offset(y: -6)) }
+}
+
 /// Monochrome primary action: inverted label on a solid primary fill.
 private struct MonoProminentButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
@@ -292,29 +312,6 @@ enum MenuBarReading: String, CaseIterable, Identifiable {
         guard defaults.string(forKey: storageKey) == nil, defaults.bool(forKey: "showTempInMenuBar") else { return }
         defaults.set(MenuBarReading.room.rawValue, forKey: storageKey)
         defaults.removeObject(forKey: "showTempInMenuBar")
-    }
-}
-
-/// The menu bar item: the snowflake, or a reading with an icon saying what it is.
-struct MenuBarLabel: View {
-    @ObservedObject var store: AppStore
-    @AppStorage(MenuBarReading.storageKey) private var reading: MenuBarReading = .off
-    @AppStorage("selectedDeviceID") private var selectedDeviceID = ""
-
-    private var selected: AirConditioner? { store.devices.first { $0.id == selectedDeviceID } ?? store.devices.first }
-
-    var body: some View {
-        if let unit = selected, let value = reading.value(for: unit) {
-            let degrees = value.formatted(.number.precision(.fractionLength(0)))
-            HStack(spacing: 4) {
-                // Each reading has its own icon: the unit for its set temperature, a house for the room, the sun for outdoors.
-                if let image = reading.glyphImage { Image(nsImage: image) } else { Image(systemName: reading.symbol) }
-                Text("\(degrees)°")
-            }
-            .accessibilityLabel("\(unit.name) \(reading.title.lowercased()) \(degrees) degrees")
-        } else {
-            Image(nsImage: MenuBarIcon.image).accessibilityLabel("TCLimate")
-        }
     }
 }
 
@@ -642,7 +639,7 @@ private struct DeviceCard: View {
                 VStack(alignment: .leading, spacing: 0) {
                     if device.isSupported && hasMoreControls {
                         sectionHeader("More", id: "more-\(device.id)", summary: nil, expanded: showControls) { showControls.toggle() }
-                        if showControls { moreControls.padding(.bottom, 10).transition(.opacity) }
+                        if showControls { moreControls.padding(.bottom, 10).transition(.sectionReveal) }
                     }
                     if device.isSupported && device.isOnline {
                         if hasMoreControls { Divider() }
@@ -652,7 +649,7 @@ private struct DeviceCard: View {
                                 Task { await energyStore.loadEnergy(for: device) }
                             }
                         }
-                        if showEnergy { energyContent.padding(.bottom, 4).transition(.opacity) }
+                        if showEnergy { energyContent.padding(.bottom, 4).transition(.sectionReveal) }
                     }
                 }
                 .padding(.top, -4)
@@ -758,7 +755,7 @@ private struct DeviceCard: View {
             .frame(minHeight: 32)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(SectionRowStyle())
         .id(id)
         .accessibilityLabel("\(expanded ? "Hide" : "Show") \(title.lowercased())")
     }
@@ -1601,3 +1598,15 @@ private struct ACHero: View {
         }
     }
 }
+
+/// A frame height that animates through layout (not just rendering), so geometry readers above it,
+/// and the window sized from them, see each mid-animation height.
+private struct AnimatedHeight: ViewModifier, Animatable {
+    var height: CGFloat?
+    var animatableData: CGFloat {
+        get { height ?? 0 }
+        set { if height != nil { height = newValue } }
+    }
+    func body(content: Content) -> some View { content.frame(height: height) }
+}
+

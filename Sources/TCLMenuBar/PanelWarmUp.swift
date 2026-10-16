@@ -16,7 +16,7 @@ enum PanelWarmUp {
         store.devices = [AirConditioner.warmUpSample, AirConditioner.warmUpSample]
         let window = NSWindow(contentRect: NSRect(x: -3000, y: -3000, width: 380, height: 700), styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
-        let host = NSHostingView(rootView: AirPanel(store: store))
+        let host = NSHostingView(rootView: AirPanel(store: store, panel: PanelState()))
         window.contentView = host
         host.layoutSubtreeIfNeeded()
         window.contentView = nil
